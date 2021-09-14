@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import com.google.gson.Gson;
 
+import my.cute.channelpoints.misc.ConditionalExecutorService;
 import my.cute.channelpoints.obs.events.EventBase;
 import my.cute.channelpoints.obs.events.MediaStartedEvent;
 import my.cute.channelpoints.obs.requests.RequestBase;
@@ -47,6 +48,8 @@ import my.cute.channelpoints.obs.requests.getcurrentscene.GetCurrentSceneRequest
 import my.cute.channelpoints.obs.requests.getcurrentscene.GetCurrentSceneResponse;
 import my.cute.channelpoints.obs.requests.getmediasourceslist.GetMediaSourcesListRequest;
 import my.cute.channelpoints.obs.requests.getmediasourceslist.GetMediaSourcesListResponse;
+import my.cute.channelpoints.obs.requests.getmediastate.GetMediaStateRequest;
+import my.cute.channelpoints.obs.requests.getmediastate.GetMediaStateResponse;
 import my.cute.channelpoints.obs.requests.getsceneitemlist.GetSceneItemListRequest;
 import my.cute.channelpoints.obs.requests.getsceneitemlist.GetSceneItemListResponse;
 import my.cute.channelpoints.obs.requests.getsourcesettings.GetSourceSettingsRequest;
@@ -79,7 +82,7 @@ public class OBSWebSocketClient {
 	private final String password;
 	private boolean isConnected = false;
 	private final Queue<RequestContainer<? extends ResponseBase>> queuedRequests;
-	private final ScheduledExecutorService executor;
+	private final ConditionalExecutorService executor;
 	
 	private final AtomicReference<String> currentSceneName = new AtomicReference<>();
 	private final AtomicBoolean studioMode = new AtomicBoolean();
@@ -94,7 +97,7 @@ public class OBSWebSocketClient {
 		this.password = password;
 		//TODO wrap this in a synchronized thing?
 		this.queuedRequests = new ArrayDeque<>(4);
-		this.executor = executor;
+		this.executor = new ConditionalExecutorService(executor);
 	}
 
 
@@ -120,10 +123,27 @@ public class OBSWebSocketClient {
 		}	
 	}
 	
+	/**
+	 * registers a new event listener. for any type T extends EventBase, whenever an event of type T occurs,
+	 * all event listeners registered to that class will be executed. the provided function will define what
+	 * action should be taken when a corresponding event occurs - ie, the provided function will be used as {@link my.cute.channelpoints.obs.ObsEventListener#accept(EventBase)}
+	 * @param <T> the type of event that the new event listener should execute on
+	 * @param eventClass the class corresponding to the type T
+	 * @param action the action to be taken when an event of the given type occurs. if the function returns 
+	 * true, the event listener will no longer be fired on any other events of this type and will be 
+	 * effectively deleted, and if the function returns false, the event listener will continue to fire on 
+	 * events of this type
+	 */
 	public <T extends EventBase> void registerEventListener(Class<T> eventClass, Function<T, Boolean> action) {
 		this.receiver.registerEventListener(ObsEventListener.createEventListener(eventClass, action));
 	}
 	
+	/**
+	 * see {@link #registerEventListener(Class, Function)}. the action defined by the provided listener will
+	 * be taken whenever an event of the corresponding type is fired, until its action returns true
+	 * @param listener the listener to be newly registered. will continue to fire on events of its type (as
+	 * specified by <code>listener.getEventClass()</code>) until its defined action returns true
+	 */
 	public void registerEventListener(ObsEventListener<? extends EventBase> listener) {
 		this.receiver.registerEventListener(listener);
 	}
@@ -222,124 +242,45 @@ public class OBSWebSocketClient {
 		this.createSourceNetworkVideo(sourceName, location, this.getCurrentSceneName(), timestamp, null);
 	}
 	
+	/*
+	 * TODO doc this + future version
+	 */
 	public void createSourceNetworkVideo(String sourceName, String location, String sceneName,
 			int timestamp, Consumer<CreateSourceResponse> callback) {
 		Objects.requireNonNull(sourceName, "source name may not be null");
 		Objects.requireNonNull(location, "location may not be null");
 		Objects.requireNonNull(sceneName, "scene name may not be null");
 		
-		Map<String, Object> sourceSettings = new HashMap<>(5);
-		List<Map<String, Object>> playlist = new ArrayList<>(3);
-		Map<String, Object> videoSettings = new HashMap<>(5);
-		videoSettings.put("hidden", false);
-		videoSettings.put("selected", false);
-		videoSettings.put("value", location);
-		playlist.add(videoSettings);
-		sourceSettings.put("loop", false);
-		sourceSettings.put("network_caching", 1000.0);
-		sourceSettings.put("playback_behavior", "always_play");
-		sourceSettings.put("playlist", playlist);
-		sourceSettings.put("shuffle", false);
-		sourceSettings.put("track", 1.0);
-		boolean startVisible = true;
+		Map<String, Object> sourceSettings = this.createDefaultSourceNetworkVideoSettings(location);
 		
-		/*
-		 * TODO
-		 * want to try a small delay after mediastarted to see if that fixes black screen on
-		 * video load (eg if its due to buffering). so when playing video, need to
-		 * 
-		 * 0. create source, set it to always play, set visibility off
-		 * 1. change volume
-		 * 2. if its youtube video, make nextmediarequest to trigger mediastarted
-		 * 3. on mediastarted,  
-		 * 		if timestamp exists, setmediatime
-		 * 		after setmediatime or if timestamp didnt exist, delay for some time
-		 * 		after delay, setvisible
-		 * 		after visibility change, commit and do original callback on source creation? (or do this earlier?)
-		 */
-		
-		//new TODO
 		this.registerEventListener(MediaStartedEvent.class, event -> {
 			if(event.getSourceName().equals(sourceName)) {
 				if(timestamp > 0) {
 					this.setMediaTime(sourceName, timestamp, mediaTimeResponse -> {
-						this.schedule(() -> {
-							this.setVisible(sourceName, true, null);
-						}, 1500, TimeUnit.MILLISECONDS);
+						this.bufferThenPlayVideoSource(sourceName);
 					});
+				} else {
+					this.bufferThenPlayVideoSource(sourceName);
 				}
 				return true;
 			} else {
 				return false;
 			}
 		});
-		
-		//old
-		if(timestamp > 0) {
-			startVisible = false;
-			this.registerEventListener(MediaStartedEvent.class, event -> {
-				if(event.getSourceName().equals(sourceName)) {
-					this.setMediaTime(sourceName, timestamp, response -> {
-						this.setVisible(sourceName, true, visibilityResponse -> {
-							this.commit();
-						});
-					});
-					return true;
-				} else {
-					return false;
-				}
-			});
-		}
-		this.sendMessage(new CreateSourceRequest(sourceName, "vlc_source", sceneName, sourceSettings, startVisible), 
+		this.sendMessage(new CreateSourceRequest(sourceName, "vlc_source", sceneName, sourceSettings, true), 
 				CreateSourceResponse.class, response -> {
 					this.setVolume(sourceName, DEFAULT_VIDEO_VOLUME);
 					if(callback != null) callback.accept(response);
 				});
 	}
 	
-	/*
-	 * TODO test
-	 * modified version of above to use future instead of chained callbacks + logic to add
-	 * delay.
-	 * returns future with created source item id. future should complete once video is buffered
-	 * and begins playing
-	 */
 	public CompletableFuture<Integer> createSourceNetworkVideoAsFuture(String sourceName, String location, String sceneName,
 			int timestamp, Consumer<CreateSourceResponse> callbackOnCreation) {
 		Objects.requireNonNull(sourceName, "source name may not be null");
 		Objects.requireNonNull(location, "location may not be null");
 		Objects.requireNonNull(sceneName, "scene name may not be null");
 		
-		Map<String, Object> sourceSettings = new HashMap<>(5);
-		List<Map<String, Object>> playlist = new ArrayList<>(3);
-		Map<String, Object> videoSettings = new HashMap<>(5);
-		videoSettings.put("hidden", false);
-		videoSettings.put("selected", false);
-		videoSettings.put("value", location);
-		playlist.add(videoSettings);
-		sourceSettings.put("loop", false);
-		sourceSettings.put("network_caching", 4000.0);
-		sourceSettings.put("playback_behavior", "pause_unpause");
-		sourceSettings.put("playlist", playlist);
-		sourceSettings.put("shuffle", false);
-		sourceSettings.put("track", 1.0);
-		
-		/*
-		 * TODO
-		 * want to try a small delay after mediastarted to see if that fixes black screen on
-		 * video load (eg if its due to buffering). so when playing video, need to
-		 * 
-		 * 0. create source, set it to always play, set visibility off
-		 * 1. change volume
-		 * 2. if its youtube video, make nextmediarequest to trigger mediastarted
-		 * 3. on mediastarted,  
-		 * 		if timestamp exists, setmediatime
-		 * 		after setmediatime or if timestamp didnt exist, pause
-		 * 		delay for some time
-		 * 		after delay, setvisible
-		 * 		after visibility change, play
-		 * 		after play, commit and do original callback on source creation? (or do this earlier?)
-		 */
+		Map<String, Object> sourceSettings = this.createDefaultSourceNetworkVideoSettings(location);
 		
 		AtomicInteger createdSourceItemId = new AtomicInteger(-1);
 		CompletableFuture<Integer> future = new CompletableFuture<>();
@@ -357,23 +298,21 @@ public class OBSWebSocketClient {
 				return false;
 			}
 		});
+		//video won't start playing until it's visible
 		this.sendMessage(new CreateSourceRequest(sourceName, "vlc_source", sceneName, sourceSettings, true), 
 				CreateSourceResponse.class, response -> {
 					this.setVolume(sourceName, DEFAULT_VIDEO_VOLUME);
 					createdSourceItemId.set(response.getItemId());
 					if(callbackOnCreation != null) callbackOnCreation.accept(response);
-					this.commit();
 				});
 		return future;
 	}
 	
 	private void bufferThenPlayVideoSource(String sourceName, AtomicInteger sourceItemId, 
 			CompletableFuture<Integer> futureItemIdTask) {
-		this.setVisible(sourceName, false, pauseResponse -> {
-			this.commit();
+		this.setVisible(sourceName, false, hideResponse -> {
 			this.schedule(() -> {
-				this.setVisible(sourceName, true, visibilityResponse -> {
-					this.commit();
+				this.setVisible(sourceName, true, showResponse -> {
 					int itemId = sourceItemId.get();
 					if(itemId != -1) {
 						futureItemIdTask.complete(itemId);
@@ -383,23 +322,87 @@ public class OBSWebSocketClient {
 										+ sourceName + "'"));
 					}
 				});
-			}, 6000, TimeUnit.MILLISECONDS);
+			}, 1000, TimeUnit.MILLISECONDS);
 		});
 	}
 	
-//	/**
-//	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
-//	 * with default parameters timestamp 0s, current scene, no callback 
-//	 * @param sourceName
-//	 * @param location
-//	 */
-//	public void createAndPlayYoutubeVideo(String sourceName, String location) {
-//		this.createAndPlayYoutubeVideo(sourceName, location, null);
+	private void bufferThenPlayVideoSource(String sourceName) {
+		this.setVisible(sourceName, false, hideResponse -> {
+			this.schedule(() -> {
+				this.setVisible(sourceName, true);
+			}, 1000, TimeUnit.MILLISECONDS);
+		});
+	}
+	
+	private Map<String, Object> createDefaultSourceNetworkVideoSettings(String location) {
+		Map<String, Object> sourceSettings = new HashMap<>(5);
+		List<Map<String, Object>> playlist = new ArrayList<>(3);
+		Map<String, Object> videoSettings = new HashMap<>(5);
+		videoSettings.put("hidden", false);
+		videoSettings.put("selected", false);
+		videoSettings.put("value", location);
+		playlist.add(videoSettings);
+		sourceSettings.put("loop", false);
+		sourceSettings.put("network_caching", 4000.0);
+		sourceSettings.put("playback_behavior", "always_play");
+		sourceSettings.put("playlist", playlist);
+		sourceSettings.put("shuffle", false);
+		sourceSettings.put("track", 1.0);
+		return sourceSettings;
+	}
+	
+	//old
+//	private void setMediaVisibleOnPlaying(String sourceName) {
+//		this.executor.scheduleWithFixedDelayAndConditionAsync(() -> {
+//			return this.getMediaState(sourceName).thenApplyAsync(mediaState -> {
+//				if(mediaState.equals("playing")) {
+//					this.setVisible(sourceName, true);
+//					return false;
+//				} else {
+//					return true;
+//				}
+//			}, this.executor);
+//		}, 0, 100, TimeUnit.MILLISECONDS);
 //	}
 	
-	public CreateAndPlayYoutubeVideoHolder createAndPlayYoutubeVideo(String sourceName, String location) {
-		return new CreateAndPlayYoutubeVideoHolder(sourceName, location);
+	//old
+//	private void setMediaVisibleOnPlaying(String sourceName, AtomicInteger sourceItemId, 
+//			CompletableFuture<Integer> futureItemIdTask) {
+//		this.setVisible(sourceName, false);
+//		this.executor.scheduleWithFixedDelayAndConditionAsync(() -> {
+//			return this.getMediaState(sourceName).thenApplyAsync(mediaState -> {
+//				if(mediaState.equals("playing")) {
+//					this.setVisible(sourceName, true, visibilityResponse -> {
+//						int itemId = sourceItemId.get();
+//						if(itemId != -1) 
+//							futureItemIdTask.complete(itemId);
+//						else 
+//							futureItemIdTask.completeExceptionally(new IllegalArgumentException("no item "
+//									+ "id generated for the created source '" + sourceName + "'"));
+//					});
+//					return false;
+//				} else {
+//					return true;
+//				}
+//			}, this.executor);
+//		}, 0, 100, TimeUnit.MILLISECONDS);
+//	}
+	
+	
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
+	 * with default parameters timestamp 0s, current scene, no callback 
+	 * @param sourceName
+	 * @param location
+	 */
+	public void createAndPlayYoutubeVideo(String sourceName, String location) {
+		this.createAndPlayYoutubeVideo(sourceName, location, null);
 	}
+	
+//	public CreateAndPlayYoutubeVideoHolder createAndPlayYoutubeVideo(String sourceName, String location) {
+//		return new CreateAndPlayYoutubeVideoHolder(sourceName, location);
+//	}
 	
 	/**
 	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
@@ -443,10 +446,7 @@ public class OBSWebSocketClient {
 	/**
 	 * convenience method to create a new source using the given youtube direct video url and
 	 * add it to the given scene (as in {@link #createSourceNetworkVideo(String, String, String, int, Consumer)})
-	 * and then also immediately begin playback of the new video source. if obs is currently in
-	 * studio mode (as determined by {@link #isStudioMode()}), the preview scene will 
-	 * automatically be transitioned to program, so that playing the video will immediately
-	 * be reflected on the stream<p>
+	 * and then also immediately begin playback of the new video source<p>
 	 * note: specifically, this creates a new vlc video source from the given location, adds
 	 * it to the given scene as a sceneitem, advances the vlc playlist one item, then begins
 	 * playing that item. this might work in general for all (or some) network videos, but
@@ -464,16 +464,6 @@ public class OBSWebSocketClient {
 	public void createAndPlayYoutubeVideo(String sourceName, String location, String sceneName,
 			int timestamp, Consumer<CreateSourceResponse> callback) {
 
-		/*
-		 * TODO seeing if i need playPauseMedia request or if itll play by itself
-		 */
-//		Consumer<CreateSourceResponse> modifiedCallback = response -> {
-//			this.nextMedia(sourceName, nextMediaResponse -> {
-//				this.playPauseMedia(sourceName, true, playResponse -> {
-//					callback.accept(response);
-//				});
-//			});
-//		};
 		Consumer<CreateSourceResponse> modifiedCallback = response -> {
 			this.nextMedia(sourceName, nextMediaResponse -> {
 				callback.accept(response);
@@ -482,16 +472,60 @@ public class OBSWebSocketClient {
 		this.createSourceNetworkVideo(sourceName, location, sceneName, timestamp, modifiedCallback);
 	}
 	
-	public CompletableFuture<Integer> createAndPlayYoutubeVideo(String sourceName, String location, String sceneName,
+	/**
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)}, except rather
+	 * than using a Consumer callback for tasks to execute once the video is playing, a 
+	 * CompletableFuture is returned instead. this future will be completed once the newly created
+	 * vlc video source enters the "playing" media state (as determined by {@link #getMediaState(String)}),
+	 * and its completion value will be the item id for that newly created vlc video source
+	 * @param sourceName
+	 * @param location
+	 * @param sceneName
+	 * @param timestamp
+	 * @return a CompletableFuture that will be completed once the newly created vlc video source enters
+	 * the "playing" state, as determined by {@link #getMediaState(String)}. its completion value will be
+	 * the item id for the newly created scene item (which will use the newly created vlc video source)
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, String sceneName,
 			int timestamp) {
 		return this.createSourceNetworkVideoAsFuture(sourceName, location, sceneName, timestamp, response -> {
 			this.nextMedia(sourceName, null);
 		});
 	}
 	
-	CompletableFuture<Integer> createAndPlayYoutubeVideo(CreateAndPlayYoutubeVideoHolder holder) {
-		return this.createAndPlayYoutubeVideo(holder.getSourceName(), holder.getLocation(), holder.getSceneName(),
-				holder.getTimestamp());
+	/**
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting 
+	 * to the current scene
+	 * @param sourceName
+	 * @param location
+	 * @param timestamp
+	 * @return
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, int timestamp) {
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, this.getCurrentSceneName(), timestamp);
+	}
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting
+	 * to a timestamp of 0 (ie, starting playback from the beginning of the video)
+	 * @param sourceName
+	 * @param location
+	 * @param sceneName
+	 * @return
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, String sceneName) {
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, sceneName, 0);
+	}
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting
+	 * to the current scene and a timestamp of 0 (ie, starting playback from the beginning of the video)
+	 * @param sourceName
+	 * @param location
+	 * @return
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location) {
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, 0);
 	}
 	
 	/**
@@ -534,6 +568,16 @@ public class OBSWebSocketClient {
 	public void setMediaTime(String sourceName, int timestamp, Consumer<SetMediaTimeResponse> callback) {
 		this.sendMessage(new SetMediaTimeRequest(sourceName, timestamp * 1000), SetMediaTimeResponse.class, callback);
 		System.out.println("sent setmediatimerequest: " + sourceName + ", " + timestamp);
+	}
+	
+	public void getMediaState(String sourceName, Consumer<GetMediaStateResponse> callback) {
+		this.sendMessage(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, callback);
+	}
+	
+	public CompletableFuture<String> getMediaState(String sourceName) {
+		CompletableFuture<String> future = new CompletableFuture<>();
+		this.sendMessageWithFuture(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, future);
+		return future;
 	}
 	
 	public void setVolume(String sourceName, double volume) {
@@ -754,59 +798,6 @@ public class OBSWebSocketClient {
 		
 		public CompletableFuture<?> getFuture() {
 			return this.future;
-		}
-	}
-	
-	public final class CreateAndPlayYoutubeVideoHolder {
-		private final String sourceName;
-		private final String location;
-		private String sceneName;
-		private int timestamp;
-		private Consumer<CreateSourceResponse> callback;
-		
-		private CreateAndPlayYoutubeVideoHolder(String sourceName, String location) {
-			this.sourceName = sourceName;
-			this.location = location;
-			this.sceneName = getCurrentSceneName();
-		}
-		
-		public CreateAndPlayYoutubeVideoHolder sceneName(String sceneName) {
-			this.sceneName = sceneName;
-			return this;
-		}
-		
-		public CreateAndPlayYoutubeVideoHolder timestamp(int timestamp) {
-			this.timestamp = timestamp;
-			return this;
-		}
-		
-		public CreateAndPlayYoutubeVideoHolder callback(Consumer<CreateSourceResponse> callback) {
-			this.callback = callback;
-			return this;
-		}
-		
-		public CompletableFuture<Integer> send() {
-			return createAndPlayYoutubeVideo(this);
-		}
-
-		String getSourceName() {
-			return this.sourceName;
-		}
-
-		String getLocation() {
-			return this.location;
-		}
-
-		String getSceneName() {
-			return this.sceneName;
-		}
-
-		int getTimestamp() {
-			return this.timestamp;
-		}
-
-		Consumer<CreateSourceResponse> getCallback() {
-			return this.callback;
 		}
 	}
 }

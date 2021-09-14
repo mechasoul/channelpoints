@@ -12,6 +12,7 @@ public enum RequestType {
 	RestartMedia,
 	NextMedia,
 	SetMediaTime,
+	GetMediaState,
 	
 	//source
 	GetMediaSourcesList,

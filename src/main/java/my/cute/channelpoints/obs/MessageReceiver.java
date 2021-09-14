@@ -21,6 +21,7 @@ import my.cute.channelpoints.obs.events.SwitchScenesEvent;
 import my.cute.channelpoints.obs.requests.ResponseBase;
 import my.cute.channelpoints.obs.requests.authenticate.AuthenticateResponse;
 import my.cute.channelpoints.obs.requests.getauthrequired.GetAuthRequiredResponse;
+import my.cute.channelpoints.obs.requests.getmediastate.GetMediaStateResponse;
 import my.cute.channelpoints.obs.requests.getsceneitemlist.GetSceneItemListResponse;
 import my.cute.channelpoints.obs.requests.getstudiomodestatus.GetStudioModeStatusResponse;
 import my.cute.channelpoints.obs.types.SimpleSceneItem;
@@ -282,6 +283,11 @@ public class MessageReceiver {
 				GetSceneItemListResponse itemListResponse = (GetSceneItemListResponse) response;
 				CompletableFuture<List<SimpleSceneItem>> itemListFuture = (CompletableFuture<List<SimpleSceneItem>>) future;
 				itemListFuture.complete(itemListResponse.getSceneItems());
+				break;
+			case "GetMediaStateResponse":
+				GetMediaStateResponse mediaStateResponse = (GetMediaStateResponse) response;
+				CompletableFuture<String> mediaStateFuture = (CompletableFuture<String>) future;
+				mediaStateFuture.complete(mediaStateResponse.getMediaState());
 				break;
 			default:
 				if(future != null) {

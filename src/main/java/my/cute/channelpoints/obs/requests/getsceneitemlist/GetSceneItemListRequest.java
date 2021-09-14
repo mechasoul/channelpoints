@@ -5,10 +5,11 @@ import my.cute.channelpoints.obs.requests.RequestType;
 
 public class GetSceneItemListRequest extends RequestBase {
 
-	private String sceneName = null;
+	private final String sceneName;
 	
 	public GetSceneItemListRequest() {
 		super(RequestType.GetSceneItemList);
+		this.sceneName = null;
 	}
 
 	public GetSceneItemListRequest(String sceneName) {
