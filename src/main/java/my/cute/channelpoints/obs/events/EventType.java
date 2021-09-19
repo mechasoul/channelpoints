@@ -4,6 +4,19 @@ import java.util.Arrays;
 import java.util.Optional;
 
 public enum EventType {
+	/*
+	 * implementation notes
+	 * implementing a new event type (events listed in 
+	 * https://github.com/Palakis/obs-websocket/blob/4.x-current/docs/generated/protocol.md)
+	 * 1. add the name of the event here (preferably in the originally written order) 
+	 * 		name must be typed exactly
+	 * 2. create the event class. add its response items listed in the protocol. use the
+	 * 		gson SerializedName annotation if the original response item name doesn't match
+	 * 		java naming convention. use private, not final. use super constructor with the
+	 * 		matching EventType you just added. create getters. (see existing event classes
+	 * 		for examples)
+	 * 3. add the enum type and event class to the toEventClass method below
+	 */
 
 	//scenes
 	SwitchScenes,
@@ -13,6 +26,7 @@ public enum EventType {
 	
 	//scene items
 	SceneItemVisibilityChanged,
+	SceneItemTransformChanged,
 	
 	//studio mode
 	StudioModeSwitched;
@@ -27,6 +41,8 @@ public enum EventType {
 				return SwitchScenesEvent.class;
 			case SceneItemVisibilityChanged:
 				return SceneItemVisibilityChangedEvent.class;
+			case SceneItemTransformChanged:
+				return SceneItemTransformChangedEvent.class;
 			default:
 				throw new IllegalArgumentException("unknown event type: " + type);
 		}

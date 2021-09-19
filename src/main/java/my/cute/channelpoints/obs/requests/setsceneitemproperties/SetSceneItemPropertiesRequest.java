@@ -34,63 +34,163 @@ public class SetSceneItemPropertiesRequest extends RequestBase {
 			return this.id;
 		}
 	}
+	
+	public static class Position {
+		private final Double x;
+		private final Double y;
+		private final Integer alignment;
+		
+		public Position(Double x, Double y, Integer alignment) {
+			this.x = x;
+			this.y = y;
+			this.alignment = alignment;
+		}
+		
+		public Double getX() {
+			return this.x;
+		}
+		
+		public Double getY() {
+			return this.y;
+		}
+		
+		public Integer getAlignment() {
+			return this.alignment;
+		}
+	}
+	
+	public static class Scale {
+		private final Double x;
+		private final Double y;
+		private final String filter;
+		
+		public Scale(Double x, Double y, String filter) {
+			this.x = x;
+			this.y = y;
+			this.filter = filter;
+		}
+		
+		public Double getX() {
+			return this.x;
+		}
+		
+		public Double getY() {
+			return this.y;
+		}
+		
+		public String getFilter() {
+			return this.filter;
+		}
+	}
+	
+	public static class Crop {
+		private final Integer top;
+		private final Integer bottom;
+		private final Integer left;
+		private final Integer right;
+		
+		public Crop(Integer top, Integer bottom, Integer left, Integer right) {
+			this.top = top;
+			this.bottom = bottom;
+			this.left = left;
+			this.right = right;
+		}
+		
+		public Integer getTop() {
+			return this.top;
+		}
+		
+		public Integer getBottom() {
+			return this.bottom;
+		}
+		
+		public Integer getLeft() {
+			return this.left;
+		}
+		
+		public Integer getRight() {
+			return this.right;
+		}
+	}
+	
+	public static class Bounds {
+		private final String type;
+		private final Integer alignment;
+		private final Double x;
+		private final Double y;
+		
+		public Bounds(String type, Integer alignment, Double x, Double y) {
+			this.type = type;
+			this.alignment = alignment;
+			this.x = x;
+			this.y = y;
+		}
+		
+		public String getType() {
+			return this.type;
+		}
+		
+		public Integer getAlignment() {
+			return this.alignment;
+		}
+		
+		public Double getX() {
+			return this.x;
+		}
+		
+		public Double getY() {
+			return this.y;
+		}
+	}
 
+	/*
+	 * implementation note
+	 * all primitives in this class are boxed because this is a general request for
+	 * setting any of a number of scene item properties. as such, every field except
+	 * item is optional (and even item only requires a name or id), and by boxing 
+	 * every primitive we can take advantage of gson skipping nulls during 
+	 * serialization
+	 */
 	@SerializedName("scene-name")
 	private final String sceneName;
 	private final Item item;
-	@SerializedName("position.x")
-	private final Double positionX;
-	@SerializedName("position.y")
-	private final Double positionY;
-	@SerializedName("position.alignment")
-	private final Integer positionAlignment;
+	private final Position position;
 	private final Double rotation;
-	@SerializedName("scale.x")
-	private final Double scaleX;
-	@SerializedName("scale.y")
-	private final Double scaleY;
-	@SerializedName("scale.filter")
-	private final String scaleFilter;
-	@SerializedName("crop.top")
-	private final Integer cropTop;
-	@SerializedName("crop.bottom")
-	private final Integer cropBottom;
-	@SerializedName("crop.left")
-	private final Integer cropLeft;
-	@SerializedName("crop.right")
-	private final Integer cropRight;
+	private final Scale scale;
+	private final Crop crop;
 	private final Boolean visible;
 	private final Boolean locked;
-	@SerializedName("bounds.type")
-	private final String boundsType;
-	@SerializedName("bounds.alignment")
-	private final Integer boundsAlignment;
-	@SerializedName("bounds.x")
-	private final Double boundsX;
-	@SerializedName("bounds.y")
-	private final Double boundsY;
+	private final Bounds bounds;
 	
 	private SetSceneItemPropertiesRequest(SetSceneItemPropertiesRequest.Builder builder) {
 		super(RequestType.SetSceneItemProperties);
 		this.sceneName = builder.sceneName;
 		this.item = new Item(builder.sceneItemName, builder.id);
-		this.positionX = builder.positionX;
-		this.positionY = builder.positionY;
-		this.positionAlignment = builder.positionAlignment;
+		
+		if(builder.positionX != null || builder.positionY != null || builder.positionAlignment != null)
+			this.position = new Position(builder.positionX, builder.positionY, builder.positionAlignment);
+		else
+			this.position = null;
+		
 		this.rotation = builder.rotation;
-		this.scaleX = builder.scaleX;
-		this.scaleY = builder.scaleY;
-		this.scaleFilter = builder.scaleFilter;
-		this.cropTop = builder.cropTop;
-		this.cropBottom = builder.cropBottom;
-		this.cropLeft = builder.cropLeft;
-		this.cropRight = builder.cropRight;
+		
+		if(builder.scaleX != null || builder.scaleY != null || builder.scaleFilter != null) 
+			this.scale = new Scale(builder.scaleX, builder.scaleY, builder.scaleFilter);
+		else
+			this.scale = null;
+		
+		if(builder.cropTop != null || builder.cropBottom != null || builder.cropLeft != null || builder.cropRight != null)
+			this.crop = new Crop(builder.cropTop, builder.cropBottom, builder.cropLeft, builder.cropRight);
+		else
+			this.crop = null;
+		
 		this.visible = builder.visible;
 		this.locked = builder.locked;
-		this.boundsType = builder.boundsType;
-		this.boundsAlignment = builder.boundsAlignment;
-		this.boundsX = builder.boundsX;
-		this.boundsY = builder.boundsY;
+		
+		if(builder.boundsType != null || builder.boundsAlignment != null || builder.boundsX != null || builder.boundsY != null)
+			this.bounds = new Bounds(builder.boundsType, builder.boundsAlignment, builder.boundsX, builder.boundsY);
+		else
+			this.bounds = null;
 	}
 	
 	public String getSceneName() {
@@ -101,48 +201,20 @@ public class SetSceneItemPropertiesRequest extends RequestBase {
 		return this.item;
 	}
 
-	public Double getPositionX() {
-		return this.positionX;
-	}
-
-	public Double getPositionY() {
-		return this.positionY;
-	}
-
-	public Integer getPositionAlignment() {
-		return this.positionAlignment;
+	public Position getPosition() {
+		return this.position;
 	}
 
 	public Double getRotation() {
 		return this.rotation;
 	}
 
-	public Double getScaleX() {
-		return this.scaleX;
+	public Scale getScale() {
+		return this.scale;
 	}
 
-	public Double getScaleY() {
-		return this.scaleY;
-	}
-
-	public String getScaleFilter() {
-		return this.scaleFilter;
-	}
-
-	public Integer getCropTop() {
-		return this.cropTop;
-	}
-
-	public Integer getCropBottom() {
-		return this.cropBottom;
-	}
-
-	public Integer getCropLeft() {
-		return this.cropLeft;
-	}
-
-	public Integer getCropRight() {
-		return this.cropRight;
+	public Crop getCrop() {
+		return this.crop;
 	}
 
 	public Boolean getVisible() {
@@ -153,22 +225,13 @@ public class SetSceneItemPropertiesRequest extends RequestBase {
 		return this.locked;
 	}
 
-	public String getBoundsType() {
-		return this.boundsType;
+	public Bounds getBounds() {
+		return this.bounds;
 	}
 
-	public Integer getBoundsAlignment() {
-		return this.boundsAlignment;
-	}
-
-	public Double getBoundsX() {
-		return this.boundsX;
-	}
-
-	public Double getBoundsY() {
-		return this.boundsY;
-	}
-
+	/**
+	 * not safe for use by more than one thread
+	 */
 	public static class Builder {
 		private String sceneName;
 		private String sceneItemName;

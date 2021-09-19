@@ -5,6 +5,7 @@ public enum RequestType {
 	//general
 	GetAuthRequired,
 	Authenticate,
+	GetVideoInfo,
 	OpenProjector,
 	
 	//media control

@@ -33,6 +33,7 @@ import com.google.gson.Gson;
 import my.cute.channelpoints.misc.ConditionalExecutorService;
 import my.cute.channelpoints.obs.events.EventBase;
 import my.cute.channelpoints.obs.events.MediaStartedEvent;
+import my.cute.channelpoints.obs.events.SceneItemTransformChangedEvent;
 import my.cute.channelpoints.obs.requests.RequestBase;
 import my.cute.channelpoints.obs.requests.RequestType;
 import my.cute.channelpoints.obs.requests.ResponseBase;
@@ -56,6 +57,8 @@ import my.cute.channelpoints.obs.requests.getsourcesettings.GetSourceSettingsReq
 import my.cute.channelpoints.obs.requests.getsourcesettings.GetSourceSettingsResponse;
 import my.cute.channelpoints.obs.requests.getstudiomodestatus.GetStudioModeStatusRequest;
 import my.cute.channelpoints.obs.requests.getstudiomodestatus.GetStudioModeStatusResponse;
+import my.cute.channelpoints.obs.requests.getvideoinfo.GetVideoInfoRequest;
+import my.cute.channelpoints.obs.requests.getvideoinfo.GetVideoInfoResponse;
 import my.cute.channelpoints.obs.requests.nextmedia.NextMediaRequest;
 import my.cute.channelpoints.obs.requests.nextmedia.NextMediaResponse;
 import my.cute.channelpoints.obs.requests.playpausemedia.PlayPauseMediaRequest;
@@ -73,6 +76,11 @@ import my.cute.channelpoints.obs.requests.transitiontoprogram.TransitionToProgra
 
 public class OBSWebSocketClient {
 	
+	/*
+	 * TODO
+	 * queue for adding video sources? or should that be managed externally?
+	 */
+	
 	private static final transient Logger log = LoggerFactory.getLogger(OBSWebSocketClient.class);
 	private static final double DEFAULT_VIDEO_VOLUME = -3.6;
 
@@ -82,12 +90,18 @@ public class OBSWebSocketClient {
 	private final String password;
 	private boolean isConnected = false;
 	private final Queue<RequestContainer<? extends ResponseBase>> queuedRequests;
+	//TODO remove?
 	private final ConditionalExecutorService executor;
+	//time before a new video source is made visible, in milliseconds. intended to combat buffering by some amount
+	private final int videoBufferingDelay;
 	
 	private final AtomicReference<String> currentSceneName = new AtomicReference<>();
 	private final AtomicBoolean studioMode = new AtomicBoolean();
+	private final AtomicInteger canvasHeight = new AtomicInteger();
+	private final AtomicInteger canvasWidth = new AtomicInteger();
 
-	public OBSWebSocketClient(ScheduledExecutorService executor, String password) throws InterruptedException, ExecutionException {
+	public OBSWebSocketClient(ScheduledExecutorService executor, String password, int videoBufferingDelay) 
+			throws InterruptedException, ExecutionException {
 		this.receiver = new MessageReceiver(this);
 		this.socket = HttpClient.newHttpClient()
 				.newWebSocketBuilder()
@@ -98,6 +112,7 @@ public class OBSWebSocketClient {
 		//TODO wrap this in a synchronized thing?
 		this.queuedRequests = new ArrayDeque<>(4);
 		this.executor = new ConditionalExecutorService(executor);
+		this.videoBufferingDelay = videoBufferingDelay;
 	}
 
 
@@ -174,6 +189,26 @@ public class OBSWebSocketClient {
 		return future;
 	}
 	
+	public void retrieveMediaState(String sourceName, Consumer<GetMediaStateResponse> callback) {
+		this.sendMessage(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, callback);
+	}
+	
+	public CompletableFuture<String> retrieveMediaState(String sourceName) {
+		CompletableFuture<String> future = new CompletableFuture<>();
+		this.sendMessageWithFuture(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, future);
+		return future;
+	}
+	
+	public void retrieveVideoInfo(Consumer<GetVideoInfoResponse> callback) {
+		this.sendMessage(new GetVideoInfoRequest(), GetVideoInfoResponse.class, callback);
+	}
+	
+	public CompletableFuture<GetVideoInfoResponse> retrieveVideoInfo() {
+		CompletableFuture<GetVideoInfoResponse> future = new CompletableFuture<>();
+		this.sendMessageWithFuture(new GetVideoInfoRequest(), GetVideoInfoResponse.class, future);
+		return future;
+	}
+	
 	/**
 	 * create a new source from an image and adds it to the given scene as a visible scene item
 	 * @param sourceName the name to give to the new source
@@ -239,65 +274,59 @@ public class OBSWebSocketClient {
 	}
 	
 	public void createSourceNetworkVideo(String sourceName, String location, int timestamp) {
-		this.createSourceNetworkVideo(sourceName, location, this.getCurrentSceneName(), timestamp, null);
+		this.createSourceNetworkVideo(sourceName, location, this.getCurrentSceneName(), timestamp);
 	}
 	
+	public void createSourceNetworkVideo(String sourceName, String location, String sceneName, int timestamp) {
+		this.createSourceNetworkVideo(sourceName, location, sceneName, timestamp, 0f, 0f);
+	}
+	
+	public void createSourceNetworkVideo(String sourceName, String location, String sceneName, int timestamp,
+			double width, double height) {
+		this.createSourceNetworkVideo(sourceName, location, sceneName, timestamp, width, height, null);
+	}
 	/*
 	 * TODO doc this + future version
+	 * visibility timing basically still good - buffering problem stil lexists, bt w/e
+	 * maybe consider implementing a playtime function? if we can schedule the delete 
+	 * along with the visibility timing or something it might be better
+	 * actually that really shouldnt matter since the future is completed at visible time
+	 * same thing?
 	 */
 	public void createSourceNetworkVideo(String sourceName, String location, String sceneName,
-			int timestamp, Consumer<CreateSourceResponse> callback) {
-		Objects.requireNonNull(sourceName, "source name may not be null");
-		Objects.requireNonNull(location, "location may not be null");
-		Objects.requireNonNull(sceneName, "scene name may not be null");
+			int timestamp, double width, double height, Consumer<CreateSourceResponse> callbackOnCreation) {
+		Map<String, Object> sourceSettings = this.createSourceNetworkVideoSettingsAndListeners(sourceName, location,
+				sceneName, timestamp, width, height, source -> 
+				this.schedule(() -> this.setVisible(source, true), this.getVideoBufferingDelay(), TimeUnit.MILLISECONDS));
 		
-		Map<String, Object> sourceSettings = this.createDefaultSourceNetworkVideoSettings(location);
-		
-		this.registerEventListener(MediaStartedEvent.class, event -> {
-			if(event.getSourceName().equals(sourceName)) {
-				if(timestamp > 0) {
-					this.setMediaTime(sourceName, timestamp, mediaTimeResponse -> {
-						this.bufferThenPlayVideoSource(sourceName);
-					});
-				} else {
-					this.bufferThenPlayVideoSource(sourceName);
-				}
-				return true;
-			} else {
-				return false;
-			}
-		});
 		this.sendMessage(new CreateSourceRequest(sourceName, "vlc_source", sceneName, sourceSettings, true), 
 				CreateSourceResponse.class, response -> {
 					this.setVolume(sourceName, DEFAULT_VIDEO_VOLUME);
-					if(callback != null) callback.accept(response);
+					if(callbackOnCreation != null) callbackOnCreation.accept(response);
 				});
 	}
 	
 	public CompletableFuture<Integer> createSourceNetworkVideoAsFuture(String sourceName, String location, String sceneName,
-			int timestamp, Consumer<CreateSourceResponse> callbackOnCreation) {
-		Objects.requireNonNull(sourceName, "source name may not be null");
-		Objects.requireNonNull(location, "location may not be null");
-		Objects.requireNonNull(sceneName, "scene name may not be null");
-		
-		Map<String, Object> sourceSettings = this.createDefaultSourceNetworkVideoSettings(location);
-		
+			int timestamp, double width, double height, Consumer<CreateSourceResponse> callbackOnCreation) {
 		AtomicInteger createdSourceItemId = new AtomicInteger(-1);
 		CompletableFuture<Integer> future = new CompletableFuture<>();
-		this.registerEventListener(MediaStartedEvent.class, event -> {
-			if(event.getSourceName().equals(sourceName)) {
-				if(timestamp > 0) {
-					this.setMediaTime(sourceName, timestamp, mediaTimeResponse -> {
-						this.bufferThenPlayVideoSource(sourceName, createdSourceItemId, future);
-					});
-				} else {
-					this.bufferThenPlayVideoSource(sourceName, createdSourceItemId, future);
-				}
-				return true;
-			} else {
-				return false;
-			}
-		});
+		
+		Map<String, Object> sourceSettings = this.createSourceNetworkVideoSettingsAndListeners(sourceName, location, 
+				sceneName, timestamp, width, height, source -> { 
+					this.schedule(() -> {
+						this.setVisible(source, true, visibleResponse -> {
+							int itemId = createdSourceItemId.get();
+							if(itemId != -1) {
+								future.complete(itemId);
+							} else {
+								future.completeExceptionally(new 
+										IllegalArgumentException("no item id generated for the created source '"
+												+ source + "'"));
+							}
+						});
+					}, this.getVideoBufferingDelay(), TimeUnit.MILLISECONDS);
+				});
+		
 		//video won't start playing until it's visible
 		this.sendMessage(new CreateSourceRequest(sourceName, "vlc_source", sceneName, sourceSettings, true), 
 				CreateSourceResponse.class, response -> {
@@ -307,30 +336,88 @@ public class OBSWebSocketClient {
 				});
 		return future;
 	}
-	
-	private void bufferThenPlayVideoSource(String sourceName, AtomicInteger sourceItemId, 
-			CompletableFuture<Integer> futureItemIdTask) {
-		this.setVisible(sourceName, false, hideResponse -> {
-			this.schedule(() -> {
-				this.setVisible(sourceName, true, showResponse -> {
-					int itemId = sourceItemId.get();
-					if(itemId != -1) {
-						futureItemIdTask.complete(itemId);
-					} else {
-						futureItemIdTask.completeExceptionally(new 
-								IllegalArgumentException("no item id generated for the created source '"
-										+ sourceName + "'"));
-					}
-				});
-			}, 1000, TimeUnit.MILLISECONDS);
+
+	private Map<String, Object> createSourceNetworkVideoSettingsAndListeners(String sourceName, String location,
+			String sceneName, int timestamp, double width, double height, Consumer<String> callbackOnScale) {
+		Objects.requireNonNull(sourceName, "source name may not be null");
+		Objects.requireNonNull(location, "location may not be null");
+		Objects.requireNonNull(sceneName, "scene name may not be null");
+		
+		if(width < 0.0 || width > 1.0) throw new IllegalArgumentException("width must be between 0 (inclusive) "
+				+ "and 1 (inclusive)");
+		if(height < 0.0 || height > 1.0) throw new IllegalArgumentException("height must be between 0 (inclusive) "
+				+ "and 1 (inclusive)");
+		
+		Map<String, Object> sourceSettings = this.createDefaultSourceNetworkVideoSettings(location);
+		
+		this.registerEventListener(MediaStartedEvent.class, event -> {
+			if(event.getSourceName().equals(sourceName)) {
+				if(timestamp > 0) {
+					this.setMediaTime(sourceName, timestamp, mediaTimeResponse -> {
+						this.setVisible(sourceName, false);
+					});
+				} else {
+					this.setVisible(sourceName, false);
+				}
+				return true;
+			} else {
+				return false;
+			}
 		});
+		
+		this.registerListenerToScaleVideoSource(sourceName, width, height, callbackOnScale);
+		
+		return sourceSettings;
 	}
 	
-	private void bufferThenPlayVideoSource(String sourceName) {
-		this.setVisible(sourceName, false, hideResponse -> {
-			this.schedule(() -> {
-				this.setVisible(sourceName, true);
-			}, 1000, TimeUnit.MILLISECONDS);
+	/**
+	 * method to scale a given video source according to some given percentage of the
+	 * output canvas
+	 * it takes some time (due to buffering, probably) for the new source's transform
+	 * to be automatically updated to the original video's resolution, so we don't 
+	 * change the transform until that happens (we don't know the actual resolution 
+	 * until that happens anyway but even if we did eg by youtube-dl i think any changes
+	 * we make would be overwritten once the video buffers). thus we use event listener
+	 * <p>
+	 * video will be scaled according to its original aspect ratio so that its width
+	 * will be equal to (width) * this.getOutputWidth() or its height will be equal
+	 * to (height) * this.getOutputHeight(), whichever is smaller (ie, the video will
+	 * fall in the rectangle defined by width = (width) * this.getOutputWidth() and
+	 * height = (height) * this.getOutputHeight() and its upper left corner in the 
+	 * upper left corner of the output canvas
+	 * <p>
+	 * note that if 0.0 is used for either parameter, no scaling will occur (this 
+	 * method will effectively do nothing)
+	 * @param sourceName
+	 * @param width a number between 0 (inclusive) and 1 (inclusive) representing
+	 * the percentage of the output canvas's width that can be used for the video 
+	 * (eg 0.5 for the video to be limited to at most half of the canvas's width).
+	 * if 0.0 is used, no resizing will occur
+	 * @param height a number between 0 (inclusive) and 1 (inclusive) representing
+	 * the percentage of the output canvas's height that can be used for the video 
+	 * (eg 0.5 for the video to be limited to at most half of the canvas's height).
+	 * if 0.0 is used, no resizing will occur
+	 */
+	private void registerListenerToScaleVideoSource(String sourceName, double width, double height, 
+			Consumer<String> callbackOnScale) {
+		this.registerEventListener(SceneItemTransformChangedEvent.class, event -> {
+			if(event.getItemName().equals(sourceName) && event.getTransform().getSourceHeight() > 0
+					&& event.getTransform().getSourceWidth() > 0) {
+				if((width == 0.0 || height == 0.0) && callbackOnScale != null) {
+					callbackOnScale.accept(sourceName);
+					return true;
+				}
+				
+				double scalingFactor = width * (double)this.getCanvasWidth() / (double)event.getTransform().getSourceWidth();
+				if(scalingFactor * (double)event.getTransform().getSourceHeight() > height * (double)this.getCanvasHeight()) {
+					scalingFactor = height * (double)this.getCanvasHeight() / (double)event.getTransform().getSourceHeight();
+				}
+				
+				this.setSceneItemScale(sourceName, scalingFactor, scalingFactor, callbackOnScale);
+				return true;
+			} else {
+				return false;
+			}
 		});
 	}
 	
@@ -389,10 +476,13 @@ public class OBSWebSocketClient {
 //	}
 	
 	
-	
+	/*
+	 * TODO
+	 * might need to use a builder for this method after all
+	 */
 	/**
-	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
-	 * with default parameters timestamp 0s, current scene, no callback 
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)},
+	 * with default parameters timestamp 0s, current scene, no callback, no video resizing
 	 * @param sourceName
 	 * @param location
 	 */
@@ -405,8 +495,8 @@ public class OBSWebSocketClient {
 //	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
-	 * with default parameters current scene, no callback
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)},
+	 * with default parameters current scene, no callback, no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param timestamp
@@ -416,8 +506,8 @@ public class OBSWebSocketClient {
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
-	 * with default parameters timestamp 0s, current scene
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)},
+	 * with default parameters timestamp 0s, current scene, no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param callback
@@ -428,8 +518,8 @@ public class OBSWebSocketClient {
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)},
-	 * with default parameter current scene
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)},
+	 * with default parameters current scene, no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param timestamp
@@ -440,13 +530,30 @@ public class OBSWebSocketClient {
 		this.createAndPlayYoutubeVideo(sourceName, location, this.getCurrentSceneName(), timestamp, callback);
 	}
 	
-	/*
-	 * TODO transformation
+	/**
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)},
+	 * with default parameter no video resizing
+	 * @param sourceName
+	 * @param location
+	 * @param sceneName
+	 * @param timestamp
+	 * @param callback
 	 */
+	public void createAndPlayYoutubeVideo(String sourceName, String location, String sceneName, int timestamp, 
+			Consumer<CreateSourceResponse> callback) {
+		this.createAndPlayYoutubeVideo(sourceName, location, sceneName, timestamp, 0.0, 0.0, callback);
+	}
+	
+	//TODO doc the consuumer params for this and whatever else
 	/**
 	 * convenience method to create a new source using the given youtube direct video url and
 	 * add it to the given scene (as in {@link #createSourceNetworkVideo(String, String, String, int, Consumer)})
-	 * and then also immediately begin playback of the new video source<p>
+	 * and then also immediately begin playback of the new video source. the created video source
+	 * will be scaled so its width is equal to (width) * this.getOutputWidth() or height is equal
+	 * to (height) * this.getOutputHeight(), whichever is smaller (ie, the source will fall within
+	 * the rectangle defined by width = (width) * this.getOutputWidth() and height = (height) *
+	 * this.getOutputHeight(), with top left corner coinciding with the top left corner of the
+	 * output canvas). if 0.0 is used for width or height, no scaling of the new video will occur<p>
 	 * note: specifically, this creates a new vlc video source from the given location, adds
 	 * it to the given scene as a sceneitem, advances the vlc playlist one item, then begins
 	 * playing that item. this might work in general for all (or some) network videos, but
@@ -460,42 +567,41 @@ public class OBSWebSocketClient {
 	 * @param timestamp the timestamp of the video to start playback from, in seconds
 	 * @param callback action to be taken once the new source has been created and playback
 	 * has started
+	 * @param width a scaling factor in [0.0, 1.0] that represents the portion of the output 
+	 * canvas that can be used for the new video source, starting from the left side of the 
+	 * screen (ie the video's size will be a max of width * this.getOutputWidth()). if 0.0 
+	 * is used, no resizing will occur
+	 * @param height see width, except for height instead of width. measured from the top of
+	 * the screen. if 0.0 is used, no resizing will occur
 	 */
 	public void createAndPlayYoutubeVideo(String sourceName, String location, String sceneName,
-			int timestamp, Consumer<CreateSourceResponse> callback) {
+			int timestamp, double width, double height, Consumer<CreateSourceResponse> callback) {
 
 		Consumer<CreateSourceResponse> modifiedCallback = response -> {
 			this.nextMedia(sourceName, nextMediaResponse -> {
 				callback.accept(response);
 			});
 		};
-		this.createSourceNetworkVideo(sourceName, location, sceneName, timestamp, modifiedCallback);
+		this.createSourceNetworkVideo(sourceName, location, sceneName, timestamp, width, height, modifiedCallback);
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, Consumer)}, except rather
-	 * than using a Consumer callback for tasks to execute once the video is playing, a 
-	 * CompletableFuture is returned instead. this future will be completed once the newly created
-	 * vlc video source enters the "playing" media state (as determined by {@link #getMediaState(String)}),
-	 * and its completion value will be the item id for that newly created vlc video source
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param sceneName
 	 * @param timestamp
-	 * @return a CompletableFuture that will be completed once the newly created vlc video source enters
-	 * the "playing" state, as determined by {@link #getMediaState(String)}. its completion value will be
-	 * the item id for the newly created scene item (which will use the newly created vlc video source)
+	 * @return
 	 */
 	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, String sceneName,
 			int timestamp) {
-		return this.createSourceNetworkVideoAsFuture(sourceName, location, sceneName, timestamp, response -> {
-			this.nextMedia(sourceName, null);
-		});
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, sceneName, timestamp, 0.0, 0.0);
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting 
-	 * to the current scene
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to current scene, no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param timestamp
@@ -506,8 +612,8 @@ public class OBSWebSocketClient {
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting
-	 * to a timestamp of 0 (ie, starting playback from the beginning of the video)
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to no timestamp (ie, play from start of video), no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @param sceneName
@@ -518,14 +624,64 @@ public class OBSWebSocketClient {
 	}
 	
 	/**
-	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int)}, except defaulting
-	 * to the current scene and a timestamp of 0 (ie, starting playback from the beginning of the video)
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to the current scene, timestamp of 0 (ie, play from start of video), no video resizing
 	 * @param sourceName
 	 * @param location
 	 * @return
 	 */
 	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location) {
 		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, 0);
+	}
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to current scene, timestamp of 0 (ie, play from start of video)
+	 * @param sourceName
+	 * @param location
+	 * @param width
+	 * @param height
+	 * @return
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, double width,
+			double height) {
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, 0, width, height);
+	}
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideoAsFuture(String, String, String, int, double, double)},
+	 * except defaulting to current scene
+	 * @param sourceName
+	 * @param location
+	 * @param timestamp
+	 * @param width
+	 * @param height
+	 * @return
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, int timestamp,
+			double width, double height) {
+		return this.createAndPlayYoutubeVideoAsFuture(sourceName, location, this.getCurrentSceneName(), timestamp, width, height);
+	}
+	
+	/**
+	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)}, except rather
+	 * than using a Consumer callback for tasks to execute once the video is playing, a 
+	 * CompletableFuture is returned instead. this future will be completed once the newly created
+	 * vlc video source enters the "playing" media state (as determined by {@link #retrieveMediaState(String)}),
+	 * and its completion value will be the item id for that newly created vlc video source
+	 * @param sourceName
+	 * @param location
+	 * @param sceneName
+	 * @param timestamp
+	 * @return a CompletableFuture that will be completed once the newly created vlc video source enters
+	 * the "playing" state, as determined by {@link #retrieveMediaState(String)}. its completion value will be
+	 * the item id for the newly created scene item (which will use the newly created vlc video source)
+	 */
+	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, String sceneName,
+			int timestamp, double width, double height) {
+		return this.createSourceNetworkVideoAsFuture(sourceName, location, sceneName, timestamp, width, height, response -> {
+			this.nextMedia(sourceName, null);
+		});
 	}
 	
 	/**
@@ -570,16 +726,6 @@ public class OBSWebSocketClient {
 		System.out.println("sent setmediatimerequest: " + sourceName + ", " + timestamp);
 	}
 	
-	public void getMediaState(String sourceName, Consumer<GetMediaStateResponse> callback) {
-		this.sendMessage(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, callback);
-	}
-	
-	public CompletableFuture<String> getMediaState(String sourceName) {
-		CompletableFuture<String> future = new CompletableFuture<>();
-		this.sendMessageWithFuture(new GetMediaStateRequest(sourceName), GetMediaStateResponse.class, future);
-		return future;
-	}
-	
 	public void setVolume(String sourceName, double volume) {
 		this.setVolume(sourceName, volume, null);
 	}
@@ -593,6 +739,36 @@ public class OBSWebSocketClient {
 	
 	public void setVisible(String sourceName, boolean visible, Consumer<SetSceneItemPropertiesResponse> callback) {
 		this.sendMessage(new SetSceneItemPropertiesRequest.Builder().sceneItemName(sourceName).visible(visible).build(), 
+				SetSceneItemPropertiesResponse.class, callback);
+	}
+	
+	public void setSceneItemScale(String sourceName, double scaleX, double scaleY) {
+		this.setSceneItemScale(sourceName, scaleX, scaleY, null);
+	}
+	
+	public void setSceneItemScale(String sourceName, double scaleX, double scaleY, Consumer<String> callback) {
+		System.out.println("sending scale request with scale: " + scaleX + ", " + scaleY);
+		this.sendMessage(new SetSceneItemPropertiesRequest.Builder().sceneItemName(sourceName)
+				.scaleX(scaleX)
+				.scaleY(scaleY)
+				.scaleFilter("OBS_SCALE_BICUBIC")
+				.build(),
+				SetSceneItemPropertiesResponse.class, response -> {
+					if(callback != null) callback.accept(sourceName);
+				});
+	}
+	
+	public void setSceneItemBounds(String sourceName, double boundsX, double boundsY) {
+		this.setSceneItemBounds(sourceName, boundsX, boundsY, null);
+	}
+	
+	public void setSceneItemBounds(String sourceName, double boundsX, double boundsY, Consumer<SetSceneItemPropertiesResponse> callback) {
+		System.out.println("set bounds: " + boundsX + ", " + boundsY);
+		this.sendMessage(new SetSceneItemPropertiesRequest.Builder().sceneItemName(sourceName)
+				.boundsType("OBS_BOUNDS_STRETCH")
+				.boundsX(boundsX)
+				.boundsY(boundsY)
+				.build(),
 				SetSceneItemPropertiesResponse.class, callback);
 	}
 	
@@ -650,6 +826,9 @@ public class OBSWebSocketClient {
 	private synchronized <T extends ResponseBase> void sendMessage(RequestBase request, Class<T> responseType, Consumer<T> callback) {
 		if(this.isConnected || request.getRequestType() == RequestType.GetAuthRequired || request.getRequestType() == RequestType.Authenticate) {
 			this.receiver.prepareForMessage(request.getMessageId(), responseType, callback);
+			if(responseType.equals(SetSceneItemPropertiesResponse.class)) {
+				System.out.println(this.gson.toJson(request));
+			}
 			this.socket.sendText(this.gson.toJson(request), true)
 				.whenComplete((socket, throwable) -> {
 					if(throwable != null) {
@@ -706,6 +885,22 @@ public class OBSWebSocketClient {
 		this.currentSceneName.compareAndSet(null, name);
 	}
 	
+	public int getCanvasHeight() {
+		return this.canvasHeight.get();
+	}
+	
+	void initCanvasHeight(int height) {
+		this.canvasHeight.compareAndSet(0, height);
+	}
+	
+	public int getCanvasWidth() {
+		return this.canvasWidth.get();
+	}
+	
+	void initCanvasWidth(int width) {
+		this.canvasWidth.compareAndSet(0,  width);
+	}
+	
 	/*
 	 * what does this return if i call it too quickly? false?
 	 */
@@ -729,6 +924,10 @@ public class OBSWebSocketClient {
 		this.studioMode.compareAndSet(false, studioMode);
 	}
 	
+	public int getVideoBufferingDelay() {
+		return this.videoBufferingDelay;
+	}
+	
 	/**
 	 * initializes commonly used values so a request doesn't need to be made every time they're
 	 * required
@@ -736,6 +935,11 @@ public class OBSWebSocketClient {
 	void initialize() {
 		this.retrieveCurrentScene(sceneResponse -> this.initCurrentSceneName(sceneResponse.getName()));
 		this.retrieveStudioModeStatus().thenAccept(status -> this.initStudioMode(status));
+		this.retrieveVideoInfo().thenAccept(response -> {
+			this.initCanvasHeight(response.getBaseHeight());
+			this.initCanvasWidth(response.getBaseWidth());
+		});
+		
 	}
 	
 	public void printStoredCallbacks() {

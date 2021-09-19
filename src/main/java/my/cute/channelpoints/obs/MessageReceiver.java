@@ -24,6 +24,7 @@ import my.cute.channelpoints.obs.requests.getauthrequired.GetAuthRequiredRespons
 import my.cute.channelpoints.obs.requests.getmediastate.GetMediaStateResponse;
 import my.cute.channelpoints.obs.requests.getsceneitemlist.GetSceneItemListResponse;
 import my.cute.channelpoints.obs.requests.getstudiomodestatus.GetStudioModeStatusResponse;
+import my.cute.channelpoints.obs.requests.getvideoinfo.GetVideoInfoResponse;
 import my.cute.channelpoints.obs.types.SimpleSceneItem;
 
 public class MessageReceiver {
@@ -261,7 +262,7 @@ public class MessageReceiver {
 					this.client.initialize();
 				else
 					throw new RuntimeException("authentication failed! unable to connect");
-				//intentionally fall through
+				//intentionally fall through in case of successful authenticate callback
 			default:
 				if(callback != null) callback.accept(response);
 				break;
@@ -288,6 +289,11 @@ public class MessageReceiver {
 				GetMediaStateResponse mediaStateResponse = (GetMediaStateResponse) response;
 				CompletableFuture<String> mediaStateFuture = (CompletableFuture<String>) future;
 				mediaStateFuture.complete(mediaStateResponse.getMediaState());
+				break;
+			case "GetVideoInfoResponse":
+				GetVideoInfoResponse videoInfoResponse = (GetVideoInfoResponse) response;
+				CompletableFuture<GetVideoInfoResponse> videoInfoFuture = (CompletableFuture<GetVideoInfoResponse>) future;
+				videoInfoFuture.complete(videoInfoResponse);
 				break;
 			default:
 				if(future != null) {
