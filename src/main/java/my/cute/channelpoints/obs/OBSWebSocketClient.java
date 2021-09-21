@@ -293,8 +293,40 @@ public class OBSWebSocketClient {
 	 * actually that really shouldnt matter since the future is completed at visible time
 	 * same thing?
 	 */
+	/**
+	 * creates a new video source using the provided direct network video, and adds it to the specified
+	 * scene as a sceneitem with the same name. the new video sceneitem will play starting from the 
+	 * provided timestamp and will be scaled according to the provided height and width. the provided
+	 * callback will be triggered on sceneitem creation. the new video's volume will be set according 
+	 * to {@link #DEFAULT_VIDEO_VOLUME}
+	 * <p>
+	 * implementation-wise, this method will register some event listeners as in 
+	 * {@link #createSourceNetworkVideoSettingsAndListeners(String, String, String, int, double, double, Consumer)}
+	 * <p>
+	 * visibility timing: the newly created source will be created visible (a new vlc source won't begin
+	 * playing until it's visible, even if set to always play regardless of visibility), then will be
+	 * hidden as soon as it fires a MediaStarted event, so that some of the buffering/resizing won't be 
+	 * visible in obs. after the video is scaled, a specified delay will pass (as determined by 
+	 * {@link #getVideoBufferingDelay()}), and then the video will be made visible
+	 * @param sourceName the name to be used for the new source and sceneitem
+	 * @param location a direct link to a network video to be used for the new vlc source
+	 * @param sceneName the name of the scene to add the new sceneitem to
+	 * @param timestamp the time to start video playback from, in seconds (0 will play from start)
+	 * @param width a number in [0.0, 1.0] representing the maximum portion of the output canvas the 
+	 * newly created video source will use (eg, 0.5 to use up to half the canvas). the new source will 
+	 * be scaled according to either width or height, whichever is smaller (ie, the new source will fall
+	 * within the rectangle defined by width = (width) * this.getOutputWidth() and height = (height) *
+	 * this.getOutputHeight() with its top left corner coinciding with the top left corner of the output
+	 * canvas). if 0.0 is used, no scaling will occur (video's actual size will be used)
+	 * @param height see width, except for height
+	 * @param callbackOnCreation a consumer that will be triggered upon creation of the new sceneitem. 
+	 * the video will not yet be playing when this is triggered
+	 * @throws NullPointerException if sourceName, location, or sceneName are null
+	 * @throws IllegalArgumentException if width or height are < 0.0 or > 1.0
+	 */
 	public void createSourceNetworkVideo(String sourceName, String location, String sceneName,
 			int timestamp, double width, double height, Consumer<CreateSourceResponse> callbackOnCreation) {
+		//note the use of scheduling setVisible according to the set video buffering delay
 		Map<String, Object> sourceSettings = this.createSourceNetworkVideoSettingsAndListeners(sourceName, location,
 				sceneName, timestamp, width, height, source -> 
 				this.schedule(() -> this.setVisible(source, true), this.getVideoBufferingDelay(), TimeUnit.MILLISECONDS));
@@ -306,6 +338,24 @@ public class OBSWebSocketClient {
 				});
 	}
 	
+	/**
+	 * see {@link #createSourceNetworkVideo(String, String, String, int, double, double, Consumer)},
+	 * except returning a CompletableFuture that will complete with the new sceneitem's item id when
+	 * the video is scaled (this should be about the same time that the new media source enters the "playing"
+	 * media state, although it will probably still be buffering when the future is completed). this allows
+	 * chaining of arbitrary code at a point when the new media source is basically ready, visible, and 
+	 * playing (eg, could be used to schedule a delete on the new source after some time)
+	 * @param sourceName
+	 * @param location
+	 * @param sceneName
+	 * @param timestamp
+	 * @param width
+	 * @param height
+	 * @param callbackOnCreation
+	 * @return a CompletableFuture that will complete with the new sceneitem's item id after it's scaled. 
+	 * strictly speaking, upon completion of the future, the media is guaranteed to have fired a MediaStarted 
+	 * event, been scaled according to the provided parameters, and been made visible
+	 */
 	public CompletableFuture<Integer> createSourceNetworkVideoAsFuture(String sourceName, String location, String sceneName,
 			int timestamp, double width, double height, Consumer<CreateSourceResponse> callbackOnCreation) {
 		AtomicInteger createdSourceItemId = new AtomicInteger(-1);
@@ -337,6 +387,34 @@ public class OBSWebSocketClient {
 		return future;
 	}
 
+	/**
+	 * helper method to perform necessary checks and prepare for the creation of a new vlc video source
+	 * <p>
+	 * two event listeners will be registered as a result of calling this method: the first will trigger
+	 * on MediaStartedEvent, and if the event corresponds to the source name used in this method call,
+	 * that source will have its timestamp set if one was provided, and will also be hidden (source is 
+	 * hidden during resizing/some of buffering to smooth viewing experience. the provided callback should
+	 * be used to make it visible again)<br>
+	 * the second will cause the source to be scaled according to the provided width and height as soon
+	 * as scaling is possible, and then to trigger the provided callback
+	 * @param sourceName the name of the new source/scene item
+	 * @param location direct link to the network video for the new vlc source
+	 * @param sceneName the name of the scene to add the new source to as a sceneitem
+	 * @param timestamp the time to start playing the video from, in seconds (0 will play from the start)
+	 * @param width scaling factor for the new source's size, representing the portion of the output canvas
+	 * that the new source can occupy (eg 0.5 represents half of the output canvas's width). measured from
+	 * the left side of the canvas. must be a number in (0.0, 1.0). if 0.0 is used, no scaling will occur
+	 * @param height scaling factor for the new source's size, representing the portion of the output canvas
+	 * that the new source can occupy (eg 0.5 represents half of the output canvas's height). measured from
+	 * the top of the canvas. must be a number in (0.0, 1.0). if 0.0 is used, no scaling will occur
+	 * @param callbackOnScale a consumer that will be triggered with the name of the new scene item
+	 * when it's resized. at this point the source will be hidden and will probably be buffering; this
+	 * callback should probably be used to at least make the source visible, in addition to anything else
+	 * @return a map suitable for use as the sourceSettings parameter in creation of a new vlc video source,
+	 * as from {@link #createDefaultSourceNetworkVideoSettings(String)}
+	 * @throws NullPointerException if sourceName, location, or sceneName are null
+	 * @throws IllegalArgumentException if width or height are < 0.0 or > 1.0
+	 */
 	private Map<String, Object> createSourceNetworkVideoSettingsAndListeners(String sourceName, String location,
 			String sceneName, int timestamp, double width, double height, Consumer<String> callbackOnScale) {
 		Objects.requireNonNull(sourceName, "source name may not be null");
@@ -397,6 +475,8 @@ public class OBSWebSocketClient {
 	 * the percentage of the output canvas's height that can be used for the video 
 	 * (eg 0.5 for the video to be limited to at most half of the canvas's height).
 	 * if 0.0 is used, no resizing will occur
+	 * @param callbackOnScale a consumer that uses the given scene item name. can
+	 * take any action, and will be called after scaling the source occurs
 	 */
 	private void registerListenerToScaleVideoSource(String sourceName, double width, double height, 
 			Consumer<String> callbackOnScale) {
@@ -421,6 +501,13 @@ public class OBSWebSocketClient {
 		});
 	}
 	
+	/**
+	 * returns a map suitable for use as sourceSettings in the creation of a new vlc video source.
+	 * notable settings are the provided video location, no looping, video always plays regardless
+	 * of visibility
+	 * @param location direct link to the new network video
+	 * @return a map suitable for use as the sourceSettings parameter in the creation of a new vlc video source
+	 */
 	private Map<String, Object> createDefaultSourceNetworkVideoSettings(String location) {
 		Map<String, Object> sourceSettings = new HashMap<>(5);
 		List<Map<String, Object>> playlist = new ArrayList<>(3);
@@ -544,7 +631,6 @@ public class OBSWebSocketClient {
 		this.createAndPlayYoutubeVideo(sourceName, location, sceneName, timestamp, 0.0, 0.0, callback);
 	}
 	
-	//TODO doc the consuumer params for this and whatever else
 	/**
 	 * convenience method to create a new source using the given youtube direct video url and
 	 * add it to the given scene (as in {@link #createSourceNetworkVideo(String, String, String, int, Consumer)})
@@ -565,14 +651,14 @@ public class OBSWebSocketClient {
 	 * @param location the url of the network video to add as a source
 	 * @param sceneName the name of the scene to add the new source to
 	 * @param timestamp the timestamp of the video to start playback from, in seconds
-	 * @param callback action to be taken once the new source has been created and playback
-	 * has started
 	 * @param width a scaling factor in [0.0, 1.0] that represents the portion of the output 
 	 * canvas that can be used for the new video source, starting from the left side of the 
 	 * screen (ie the video's size will be a max of width * this.getOutputWidth()). if 0.0 
 	 * is used, no resizing will occur
 	 * @param height see width, except for height instead of width. measured from the top of
 	 * the screen. if 0.0 is used, no resizing will occur
+	 * @param callback action to be taken once the new source has been created (playback will
+	 * almost certainly not have started yet)
 	 */
 	public void createAndPlayYoutubeVideo(String sourceName, String location, String sceneName,
 			int timestamp, double width, double height, Consumer<CreateSourceResponse> callback) {
@@ -667,15 +753,17 @@ public class OBSWebSocketClient {
 	 * see {@link #createAndPlayYoutubeVideo(String, String, String, int, double, double, Consumer)}, except rather
 	 * than using a Consumer callback for tasks to execute once the video is playing, a 
 	 * CompletableFuture is returned instead. this future will be completed once the newly created
-	 * vlc video source enters the "playing" media state (as determined by {@link #retrieveMediaState(String)}),
-	 * and its completion value will be the item id for that newly created vlc video source
+	 * scene item is scaled (probably about the same time that it enters the "playing" mediastate)
+	 * and its completion value will be the item id for that newly created vlc video source. see 
+	 * {@link #createSourceNetworkVideoAsFuture(String, String, String, int, double, double, Consumer)}
+	 * for exact details
 	 * @param sourceName
 	 * @param location
 	 * @param sceneName
 	 * @param timestamp
-	 * @return a CompletableFuture that will be completed once the newly created vlc video source enters
-	 * the "playing" state, as determined by {@link #retrieveMediaState(String)}. its completion value will be
-	 * the item id for the newly created scene item (which will use the newly created vlc video source)
+	 * @param width
+	 * @param height
+	 * @return
 	 */
 	public CompletableFuture<Integer> createAndPlayYoutubeVideoAsFuture(String sourceName, String location, String sceneName,
 			int timestamp, double width, double height) {
@@ -746,12 +834,19 @@ public class OBSWebSocketClient {
 		this.setSceneItemScale(sourceName, scaleX, scaleY, null);
 	}
 	
+	/**
+	 * scales the given scene item according to the given scale factors. after scaling occurs, the
+	 * provided callback will be triggered with the scene item's name
+	 * @param sourceName the name of the scene item to scale
+	 * @param scaleX the new x scale factor
+	 * @param scaleY the new y scale factor
+	 * @param callback a consumer that accepts the name of the resized scene item. can take any action,
+	 * and will be triggered after the scaling is complete
+	 */
 	public void setSceneItemScale(String sourceName, double scaleX, double scaleY, Consumer<String> callback) {
-		System.out.println("sending scale request with scale: " + scaleX + ", " + scaleY);
 		this.sendMessage(new SetSceneItemPropertiesRequest.Builder().sceneItemName(sourceName)
 				.scaleX(scaleX)
 				.scaleY(scaleY)
-				.scaleFilter("OBS_SCALE_BICUBIC")
 				.build(),
 				SetSceneItemPropertiesResponse.class, response -> {
 					if(callback != null) callback.accept(sourceName);

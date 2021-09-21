@@ -21,15 +21,23 @@ import java.util.concurrent.TimeoutException;
  * <b>this class requires youtube-dl.exe in working directory or nothing works</b>
  */
 public final class YoutubeDownloader {
+	
+	private static final int DEFAULT_MAX_RES = 720;
 
 	private final ExecutorService executor;
+	private final int maximumResolution;
 	
 	public YoutubeDownloader() {
 		this(ForkJoinPool.commonPool());
 	}
 	
 	public YoutubeDownloader(ExecutorService executor) {
+		this(executor, DEFAULT_MAX_RES);
+	}
+	
+	public YoutubeDownloader(ExecutorService executor, int maxRes) {
 		this.executor = executor;
+		this.maximumResolution = maxRes;
 	}
 	
 	/**
@@ -54,7 +62,8 @@ public final class YoutubeDownloader {
 		return CompletableFuture.supplyAsync(() -> {
 				try {
 					Path outputPath = Files.createTempFile(null, ".tmp");
-					Process dl = new ProcessBuilder("youtube-dl.exe", "--no-playlist", "-g", "-f \"best[height<=?720]\"", link)
+					Process dl = new ProcessBuilder("youtube-dl.exe", "--no-playlist", "-g", "-f \"best[height<=?"
+							+ this.maximumResolution + "]\"", link)
 							.redirectOutput(outputPath.toFile())
 							.start();
 					if(!dl.waitFor(20, TimeUnit.SECONDS)) {
